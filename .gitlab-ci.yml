@@ -4,9 +4,9 @@ stages:
 deploy_prod:
   stage: deploy
   only:
-    - main
+    - private
   tags:
-    - mp3runner
+    - runner
   script:
     - cd /opt/mp3dloader
     - echo "🚀 Деплой PROD бота..."
