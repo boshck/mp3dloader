@@ -1,0 +1,15 @@
+stages:
+    - deploy
+
+deploy_prod:
+  stage: deploy
+  only:
+    - main
+  tags:
+    - mp3runner
+  script:
+    - cd /opt/mp3dloader
+    - echo "🚀 Деплой PROD бота..."
+    - docker compose down || true
+    - docker compose up -d --build
+    - echo "GO"

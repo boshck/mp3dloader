@@ -1,0 +1,11 @@
+.git
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.vscode/
+.idea/
+assets/temp/*
+logs/*
+.env
+*.log

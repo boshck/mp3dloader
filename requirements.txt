@@ -1,0 +1,24 @@
+# Существующие зависимости
+aiogram==3.22.0
+python-dotenv==1.1.1
+aiohttp==3.12.15
+yt-dlp>=2024.12.13
+aiofiles>=24.1.0
+
+# Новые зависимости для исследования Зайцев.нет
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# SoundCloud API зависимости (заменена на requests-based решение)
+# soundcloud>=0.5.0  # Устарела, несовместима с Python 3.13
+
+# База данных зависимости
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+
+# Ускорение yt-dlp для M3U8 потоков
+pycryptodomex>=3.19.0
+
+# Redis для лимитов и кеширования
+redis[async]>=5.0.0

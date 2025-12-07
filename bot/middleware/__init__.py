@@ -1,0 +1,3 @@
+"""
+Middleware для AMusic Bot
+"""
