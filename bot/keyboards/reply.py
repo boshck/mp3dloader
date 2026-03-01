@@ -9,10 +9,10 @@ def create_main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Создает главное меню бота"""
     builder = ReplyKeyboardBuilder()
     
-    builder.add(KeyboardButton(text="🎵 Поиск музыки"))
-    builder.add(KeyboardButton(text="⭐ Избранное"))
-    builder.add(KeyboardButton(text="📊 Статистика"))
-    builder.add(KeyboardButton(text="⚙️ Настройки"))
+    builder.add(KeyboardButton(text="📎 Поддерживаемые ссылки"))
+    builder.add(KeyboardButton(text="ℹ️ Помощь"))
+    builder.add(KeyboardButton(text="⚡ Ограничения"))
+    builder.add(KeyboardButton(text="🧭 Пример ссылки"))
     
     builder.adjust(2)  # 2 кнопки в ряду
     return builder.as_markup(resize_keyboard=True)

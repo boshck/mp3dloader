@@ -263,6 +263,67 @@ class RedisClient:
         
         # In-memory fallback
         return len(self._memory_zsets.get(key, []))
+
+    async def zcount(self, key: str, min_score: float, max_score: float) -> int:
+        """Получить количество элементов в sorted set по диапазону score"""
+        if self._connected and self._redis:
+            try:
+                return await self._redis.zcount(key, min_score, max_score)
+            except Exception as e:
+                logger.warning(f"Redis ZCOUNT error, fallback to memory: {e}")
+                self._connected = False
+        
+        # In-memory fallback
+        if key not in self._memory_zsets:
+            return 0
+        return sum(1 for score, _ in self._memory_zsets[key] if min_score <= score <= max_score)
+
+    async def zrevrange(self, key: str, start: int, stop: int, withscores: bool = False):
+        """Получить элементы sorted set в обратном порядке"""
+        if self._connected and self._redis:
+            try:
+                return await self._redis.zrevrange(key, start, stop, withscores=withscores)
+            except Exception as e:
+                logger.warning(f"Redis ZREVRANGE error, fallback to memory: {e}")
+                self._connected = False
+        
+        # In-memory fallback
+        values = sorted(self._memory_zsets.get(key, []), key=lambda x: x[0], reverse=True)
+        
+        # Redis semantics: stop is inclusive and may be -1
+        if stop == -1:
+            sliced = values[start:]
+        else:
+            sliced = values[start:stop + 1]
+        
+        if withscores:
+            return [(value, score) for score, value in sliced]
+        return [value for score, value in sliced]
+
+    async def zincrby(self, key: str, amount: float, member: str):
+        """Увеличить score элемента в sorted set"""
+        if self._connected and self._redis:
+            try:
+                return await self._redis.zincrby(key, amount, member)
+            except Exception as e:
+                logger.warning(f"Redis ZINCRBY error, fallback to memory: {e}")
+                self._connected = False
+        
+        # In-memory fallback
+        if key not in self._memory_zsets:
+            self._memory_zsets[key] = []
+        
+        for idx, (score, value) in enumerate(self._memory_zsets[key]):
+            if value == member:
+                new_score = score + amount
+                self._memory_zsets[key][idx] = (new_score, value)
+                self._memory_zsets[key].sort(key=lambda x: x[0])
+                return new_score
+        
+        new_score = amount
+        self._memory_zsets[key].append((new_score, member))
+        self._memory_zsets[key].sort(key=lambda x: x[0])
+        return new_score
     
     async def exists(self, key: str) -> bool:
         """Проверить существование ключа"""
@@ -305,4 +366,3 @@ class RedisClient:
 
 # Глобальный экземпляр клиента (будет инициализирован в main.py)
 redis_client: Optional[RedisClient] = None
-

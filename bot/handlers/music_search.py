@@ -1,5 +1,5 @@
 """
-Обработчик поиска музыки через VK API
+Обработчик поиска и скачивания музыки по ссылкам
 """
 
 import os
@@ -21,10 +21,20 @@ from collections import deque, OrderedDict
 
 from bot.services.vk_api import VKAPI
 from bot.models.vk_track import VKTrack
-from bot.constants.messages import SEARCH_START_MESSAGE, SEARCH_RESULTS_MESSAGE
+from bot.constants.messages import (
+    SEARCH_START_MESSAGE,
+    SEARCH_RESULTS_MESSAGE,
+    HELP_MESSAGE,
+    TEXT_QUERY_NOT_SUPPORTED_MESSAGE,
+    TEMPORARY_SOURCE_LIMIT_MESSAGE,
+    SUPPORTED_LINKS_MENU_MESSAGE,
+    LIMITS_MENU_MESSAGE,
+    EXAMPLES_MENU_MESSAGE,
+)
 # Убрали импорт NEW_SEARCH_BUTTON - кнопка удалена
 from bot.keyboards.inline import create_track_keyboard
 from bot.keyboards.pagination import create_pagination_keyboard
+from bot.keyboards.reply import create_main_menu_keyboard
 from bot.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -39,10 +49,11 @@ class SearchStates(StatesGroup):
 class MusicSearchHandler:
     """Универсальный обработчик поиска музыки"""
     
-    def __init__(self, rate_limiter=None, admin_notifier=None):
+    def __init__(self, rate_limiter=None, admin_notifier=None, usage_stats=None):
         self.vk_api = None
         self.rate_limiter = rate_limiter  # Сервис лимитов
         self.admin_notifier = admin_notifier  # Система уведомлений администратора
+        self.usage_stats = usage_stats  # Сервис статистики использования
         self.search_cache = OrderedDict()  # Кеш результатов поиска (устарел, теперь в Redis)
         
         # Ограничения кэша поиска
@@ -166,6 +177,28 @@ class MusicSearchHandler:
         else:
             self._user_queues[user_id]['last_activity'] = time.time()
         return self._user_queues[user_id]
+
+    def is_admin_user(self, user_id: int) -> bool:
+        """Проверяет, является ли пользователь администратором."""
+        if not settings.admin_chat_id:
+            return False
+        return str(user_id) == str(settings.admin_chat_id).strip()
+
+    async def track_user_activity(self, message: Message):
+        """Регистрирует активность пользователя для админ-статистики."""
+        if not self.usage_stats or not message or not message.from_user:
+            return
+
+        try:
+            user = message.from_user
+            await self.usage_stats.track_activity(
+                user_id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to track user activity: {e}")
     
     async def _start_download_task(self, callback, track_info, user_id):
         """Запустить задачу скачивания"""
@@ -299,11 +332,26 @@ class MusicSearchHandler:
     async def start_search(self, message: Message, state: FSMContext):
         """Начало поиска музыки"""
         logger.info(f"User {message.from_user.id} started music search")
-        await message.answer(SEARCH_START_MESSAGE, parse_mode="HTML")
+        welcome_text = SEARCH_START_MESSAGE.format(user=message.from_user)
+        await message.answer(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=create_main_menu_keyboard()
+        )
         await state.set_state(SearchStates.waiting_for_query)
     
     async def handle_search_query(self, message: Message, state: FSMContext):
         """Обработка поискового запроса"""
+        await self.track_user_activity(message)
+
+        if not message.text:
+            await message.answer(
+                TEXT_QUERY_NOT_SUPPORTED_MESSAGE,
+                parse_mode="HTML",
+                reply_markup=create_main_menu_keyboard()
+            )
+            return
+
         query = message.text.strip()
         user_id = message.from_user.id
         username = message.from_user.username or "Unknown"
@@ -314,87 +362,30 @@ class MusicSearchHandler:
         from bot.utils.url_parser import parse_url
         
         parsed_url = parse_url(query)
-        if parsed_url:
-            logger.info(f"Detected {parsed_url.source} {parsed_url.type}: {query}")
-            
-            # Обработка ссылки
-            if parsed_url.type in ['playlist', 'audios_page', 'post']:
-                await self._handle_playlist_link(message, parsed_url, user_id)
-            else:  # track
-                await self._handle_track_link(message=message, parsed_url=parsed_url, user_id=user_id)
+        if not parsed_url:
+            await message.answer(
+                TEXT_QUERY_NOT_SUPPORTED_MESSAGE,
+                parse_mode="HTML",
+                reply_markup=create_main_menu_keyboard()
+            )
             return
         
-        # Валидация запроса
-        if len(query) < 2:
-            await message.answer("❌ Запрос слишком короткий. Минимум 2 символа.")
+        logger.info(f"Detected {parsed_url.source} {parsed_url.type}: {query}")
+        
+        # Временный режим: только YouTube и SoundCloud ссылки
+        if parsed_url.source not in ("youtube", "soundcloud"):
+            await message.answer(
+                TEMPORARY_SOURCE_LIMIT_MESSAGE,
+                parse_mode="HTML",
+                reply_markup=create_main_menu_keyboard()
+            )
             return
         
-        if len(query) > 100:
-            await message.answer("❌ Запрос слишком длинный. Максимум 100 символов.")
-            return
-        
-        # Проверяем кеш результатов поиска (если есть rate_limiter)
-        all_tracks = None
-        if self.rate_limiter:
-            all_tracks = await self.rate_limiter.get_cached_search(query)
-            if all_tracks:
-                logger.info(f"Using cached results for '{query}': {len(all_tracks)} tracks")
-                # Конвертируем из сериализованного формата обратно в track_info
-                all_tracks = await self._deserialize_cached_tracks(all_tracks)
-        
-        # Проверяем лимиты (если нет кеша)
-        if not all_tracks and self.rate_limiter:
-            allowed, wait_minutes, limit_message = await self.rate_limiter.check_limit(user_id)
-            if not allowed:
-                await message.answer(limit_message)
-                return
-            
-            # Регистрируем операцию поиска
-            await self.rate_limiter.register_operation(user_id)
-        
-        # Показываем сообщение о поиске
-        search_msg = await message.answer("🔍 Ищу музыку...")
-        
-        try:
-            # Поиск по всем источникам (если не было в кеше)
-            if not all_tracks:
-                all_tracks = await self._search_all_sources(query)
-                
-                # Кешируем результаты (если есть rate_limiter)
-                if all_tracks and self.rate_limiter:
-                    await self.rate_limiter.cache_search(query, all_tracks)
-            
-            if not all_tracks:
-                try:
-                    await search_msg.edit_text("❌ Ничего не найдено. Попробуйте другой запрос.")
-                except Exception as e:
-                    logger.warning(f"Failed to edit search message: {e}")
-                    await search_msg.answer("❌ Ничего не найдено. Попробуйте другой запрос.")
-                return
-            
-            # Сохраняем результаты в кеш с timestamp
-            import time
-            self.search_cache[str(user_id)] = {
-                'query': query,
-                'tracks': all_tracks,
-                'stored_at': time.time()
-            }
-            
-            # Показываем результаты
-            await self._show_search_results(search_msg, all_tracks, query, user_id, 1, all_tracks)
-            if state:
-                await state.set_state(SearchStates.showing_results)
-            
-        except Exception as e:
-            logger.error(f"Search error: {e}")
-            try:
-                if search_msg.text or search_msg.caption:
-                    await search_msg.edit_text("❌ Ошибка при поиске. Попробуйте позже.")
-                else:
-                    await search_msg.answer("❌ Ошибка при поиске. Попробуйте позже.")
-            except Exception as edit_error:
-                logger.warning(f"Failed to edit error message: {edit_error}")
-                await search_msg.answer("❌ Ошибка при поиске. Попробуйте позже.")
+        # Обработка поддерживаемой ссылки
+        if parsed_url.type in ['playlist', 'audios_page', 'post']:
+            await self._handle_playlist_link(message, parsed_url, user_id)
+        else:  # track
+            await self._handle_track_link(message=message, parsed_url=parsed_url, user_id=user_id)
     
     async def _search_all_sources(self, query: str) -> List[Dict[str, Any]]:
         """Поиск по всем доступным источникам с таймаутом 10 секунд"""
@@ -1304,24 +1295,88 @@ music_handler = MusicSearchHandler()
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     """Команда /start - приветствие и информация о боте"""
+    await music_handler.track_user_activity(message)
+
     user = message.from_user
     logger.info(f"User {user.id} ({user.username}) started the bot")
     
     welcome_text = SEARCH_START_MESSAGE.format(user=user)
-    await message.answer(welcome_text, parse_mode="HTML")
+    await message.answer(
+        welcome_text,
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
+    )
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    """Команда /help - перенаправление на /start"""
+    """Команда /help - подробная помощь"""
+    await music_handler.track_user_activity(message)
+
     user = message.from_user
     logger.info(f"User {user.id} ({user.username}) used /help command")
-    welcome_text = SEARCH_START_MESSAGE.format(user=user)
-    await message.answer(welcome_text, parse_mode="HTML")
+    await message.answer(
+        HELP_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
+    )
 
 @router.message(Command("search"))
 async def cmd_search(message: Message, state: FSMContext):
     """Команда поиска музыки"""
+    await music_handler.track_user_activity(message)
     await music_handler.start_search(message, state)
+
+@router.message(Command("admin_stats"))
+async def cmd_admin_stats(message: Message):
+    """Админ-команда: статистика пользователей"""
+    await music_handler.track_user_activity(message)
+
+    user_id = message.from_user.id
+    if not music_handler.is_admin_user(user_id):
+        await message.answer("⛔ Команда доступна только администратору.")
+        return
+
+    if not music_handler.usage_stats:
+        await message.answer("⚠️ Сервис статистики пока недоступен.")
+        return
+
+    try:
+        overview = await music_handler.usage_stats.get_overview()
+        recent_users = await music_handler.usage_stats.get_recent_users(limit=10)
+        top_users = await music_handler.usage_stats.get_top_users(limit=10)
+
+        text = (
+            "📊 Статистика бота\n\n"
+            f"Всего пользователей: {overview['total_users']}\n"
+            f"DAU (24ч): {overview['dau']}\n"
+            f"WAU (7д): {overview['wau']}\n"
+            f"MAU (30д): {overview['mau']}\n"
+            f"Обновлено: {music_handler.usage_stats.format_ts(overview['updated_at'])}\n\n"
+        )
+
+        text += "🕒 Последние активные:\n"
+        if recent_users:
+            for idx, item in enumerate(recent_users, 1):
+                username_part = f"@{item['username']}" if item["username"] else "-"
+                text += (
+                    f"{idx}. {item['user_id']} ({username_part}) "
+                    f"- {music_handler.usage_stats.format_ts(item['last_seen_ts'])}\n"
+                )
+        else:
+            text += "нет данных\n"
+
+        text += "\n🔥 Топ по операциям:\n"
+        if top_users:
+            for idx, item in enumerate(top_users, 1):
+                username_part = f"@{item['username']}" if item["username"] else "-"
+                text += f"{idx}. {item['user_id']} ({username_part}) - {item['operations']}\n"
+        else:
+            text += "нет данных\n"
+
+        await message.answer(text)
+    except Exception as e:
+        logger.error(f"admin_stats error: {e}")
+        await message.answer("❌ Не удалось получить статистику. Попробуйте позже.")
 
 @router.message(SearchStates.waiting_for_query)
 async def handle_search_query(message: Message, state: FSMContext):
@@ -1340,12 +1395,55 @@ async def handle_pagination_callback(callback: CallbackQuery):
 
 # Убрали обработчик new_search - кнопка удалена
 
+@router.message(F.text == "📎 Поддерживаемые ссылки")
+async def menu_supported_links(message: Message):
+    """Показывает поддерживаемые источники и форматы ссылок"""
+    await music_handler.track_user_activity(message)
+    await message.answer(
+        SUPPORTED_LINKS_MENU_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
+    )
+
+@router.message(F.text == "ℹ️ Помощь")
+async def menu_help(message: Message):
+    """Показывает справку из меню"""
+    await music_handler.track_user_activity(message)
+    await message.answer(
+        HELP_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
+    )
+
+@router.message(F.text == "⚡ Ограничения")
+async def menu_limits(message: Message):
+    """Показывает технические ограничения"""
+    await music_handler.track_user_activity(message)
+    await message.answer(
+        LIMITS_MENU_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
+    )
+
+@router.message(F.text == "🧭 Пример ссылки")
+async def menu_examples(message: Message):
+    """Показывает примеры корректных ссылок"""
+    await music_handler.track_user_activity(message)
+    await message.answer(
+        EXAMPLES_MENU_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=create_main_menu_keyboard()
+    )
+
 @router.message()
 async def handle_backdoor(message: Message):
     """Обработка бекдора для сброса лимитов"""
+    if settings.admin_backdoor_command and message.text == settings.admin_backdoor_command:
+        await music_handler.track_user_activity(message)
+
     # Проверяем, что сообщение содержит текст (не стикер, не фото и т.д.)
     if not message.text:
-        await message.answer("❌ Пожалуйста, отправьте текстовое сообщение для поиска музыки.")
+        await message.answer("❌ Пожалуйста, отправьте текстовое сообщение со ссылкой.")
         return
     
     # Проверяем backdoor команду (только если она установлена)

@@ -158,6 +158,7 @@ async def main():
         # Инициализируем Redis и Rate Limiter
         logger.info("Инициализируем Redis и Rate Limiter...")
         rate_limiter = None
+        usage_stats = None
         
         # Инициализируем систему уведомлений администратора
         logger.info("Инициализируем систему уведомлений...")
@@ -236,6 +237,11 @@ async def main():
             logger.info("RateLimiter создан")
             logger.info(f"Лимиты: {settings.operations_per_user} операций/{settings.user_window_minutes} мин на пользователя")
             logger.info(f"Глобально: {settings.global_operations_limit} операций/{settings.global_window_minutes} мин")
+
+            # Сервис статистики использования (админ-команда /admin_stats)
+            from bot.utils.usage_stats import UsageStatsService
+            usage_stats = UsageStatsService(redis_client=redis_client)
+            logger.info("UsageStatsService инициализирован")
         else:
             logger.warning("Redis/RateLimiter не импортированы, работаем без лимитов")
         
@@ -265,11 +271,12 @@ async def main():
         logger.info("youtube_router отключен (DEPRECATED - функции в music_search_router)")
             
         if music_search_router:
-            # Передаем rate_limiter и admin_notifier в music_handler
+            # Передаем зависимости в music_handler
             from bot.handlers.music_search import music_handler
             music_handler.rate_limiter = rate_limiter
             music_handler.admin_notifier = admin_notifier
-            logger.info("RateLimiter и AdminNotifier переданы в music_handler")
+            music_handler.usage_stats = usage_stats
+            logger.info("RateLimiter, AdminNotifier и UsageStats переданы в music_handler")
             
             dp.include_router(music_search_router)
             logger.info("music_search_router зарегистрирован")
@@ -277,8 +284,8 @@ async def main():
             logger.error("music_search_router не зарегистрирован (ошибка импорта)")
             
         logger.info("Регистрация роутеров завершена!")
-        logger.info("Все команды обрабатываются поиском VK")
-        logger.info("Доступны команды: /start, /help, /search")
+        logger.info("Режим работы: скачивание по ссылкам YouTube/SoundCloud")
+        logger.info("Доступны команды: /start, /help, /search, /admin_stats")
         logger.info("Все старые роутеры отключены (DEPRECATED)")
         
         # Запускаем фоновые задачи управления ресурсами
